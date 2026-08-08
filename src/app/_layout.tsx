@@ -18,6 +18,7 @@ import { View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { queryClient } from '@/lib/api/queryClient';
+import { BudgetsProvider } from '@/store/budgets';
 import { SettingsProvider, useSettings } from '@/store/settings';
 import { AppThemeProvider, useTheme } from '@/theme/ThemeProvider';
 
@@ -84,7 +85,9 @@ export default function RootLayout() {
       <SettingsProvider>
         <AppThemeProvider>
           <QueryClientProvider client={queryClient}>
-            <RootNavigator />
+            <BudgetsProvider>
+              <RootNavigator />
+            </BudgetsProvider>
           </QueryClientProvider>
         </AppThemeProvider>
       </SettingsProvider>

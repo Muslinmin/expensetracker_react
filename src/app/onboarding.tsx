@@ -1,4 +1,4 @@
-import { CheckCircle2, Eye, EyeOff, Moon, Sun, TrendingDown } from 'lucide-react-native';
+import { Eye, EyeOff, Moon, Sun, TrendingDown } from 'lucide-react-native';
 import { useState } from 'react';
 import {
   KeyboardAvoidingView,
@@ -153,7 +153,7 @@ export default function Onboarding() {
             </Sans>
             <Sans tone="muted">
               XPNS talks to your own backend. Point it at the address and paste the API key
-              from the server's environment.
+              from the server&apos;s environment.
             </Sans>
           </View>
 

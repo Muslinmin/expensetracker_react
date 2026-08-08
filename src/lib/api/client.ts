@@ -159,7 +159,7 @@ export function createApi(baseUrl: string, serverKey: string): Api {
           }
           try {
             resolve(JSON.parse(xhr.responseText));
-          } catch (e) {
+          } catch {
             reject(new ApiError(xhr.status, 'Server returned a malformed response'));
           }
         };

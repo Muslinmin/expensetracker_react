@@ -126,3 +126,26 @@ export function trailingTwelvePeriods(now = new Date()): Period[] {
   const cur = toPeriod(now);
   return Array.from({ length: 12 }, (_, i) => addMonths(cur, i - 11));
 }
+
+/**
+ * The live database's transaction history doesn't necessarily reach the
+ * current month (see §2 of the frontend doc — real seed data stopped months
+ * before "today"), so `/summary` for the current period can silently come
+ * back `[]`. The Dashboard defaults to whichever period actually has rows
+ * rather than the calendar's current month. `YYYY-MM` strings sort correctly
+ * lexicographically, so a plain max works.
+ */
+export function mostRecentPeriodWithData(periodsWithData: Period[], fallback: Period): Period {
+  if (periodsWithData.length === 0) return fallback;
+  return periodsWithData.reduce((latest, p) => (p > latest ? p : latest));
+}
+
+/**
+ * A rolling window of months around today for month pickers (budget scope
+ * dates). The scaffold hardcoded a fixed 2026-2027 calendar list; this stays
+ * correct regardless of what "today" is.
+ */
+export function nearbyMonths(before = 12, after = 12, now = new Date()): Period[] {
+  const cur = toPeriod(now);
+  return Array.from({ length: before + after + 1 }, (_, i) => addMonths(cur, i - before));
+}

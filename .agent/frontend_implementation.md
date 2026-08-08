@@ -6,7 +6,11 @@ decided and why, what actually exists in the repo today, and what is left. For t
 correct** — see [Contract Corrections](#contract-corrections-verified-against-the-running-backend).
 
 Last verified against the live backend on 2026-08-07 (473 real transactions rendering on an
-Android emulator).
+Android emulator). Phases 4–5 and the budget half of Phase 6 (added 2026-08-08) passed
+`tsc --noEmit` / `expo lint` / a clean `expo export` bundle throughout, and the Dashboard's trend
+chart (scroll, long-press-to-inspect, y-axis scaling) is now confirmed working on-device (Android,
+Expo Go) — see 1.9. The rest of the Dashboard and the Budget screen's CRUD flow are still only
+build-verified, not yet exercised on-device.
 
 ---
 
@@ -26,7 +30,7 @@ components under `src/app/components/ui/` are dead code** and were never ported.
 |---|---|---|
 | `lucide-react` | `lucide-react-native` | Near drop-in; needs `react-native-svg` |
 | Tailwind classes | StyleSheet + typed tokens | See 1.2 |
-| `recharts` | TBD (Phase 4) | Full rewrite; tooltips must become tap-to-select |
+| `recharts` | `react-native-gifted-charts` | Full rewrite; tooltips became tap-to-select — see 1.9 |
 | `localStorage` | AsyncStorage + `expo-secure-store` | Server key goes to SecureStore only |
 | `<table>` | `FlatList` | |
 | `position: fixed` | `Modal` | Splash, onboarding, pickers |
@@ -98,6 +102,65 @@ Upload goes through `XMLHttpRequest` rather than `fetch`, because RN's `fetch` r
 progress. That makes step 1 of the import progress indicator genuinely real; the remaining steps
 are indeterminate server-side work.
 
+### 1.9 Chart library: `react-native-gifted-charts`, not `victory-native` XL
+
+Decided in favour of the lighter option from the two the doc had shortlisted: `react-native-gifted-charts`
+only needs `react-native-svg`, already a dependency for the lucide icons. `victory-native` XL needs
+`@shopify/react-native-skia`, a second rendering dependency this project has no other use for — not
+worth the extra native surface on an SDK 57 / RN 0.86 stack this new, where an untested combination
+is a real risk (see 1.2's NativeWind rejection for the same reasoning).
+
+Neither library's tooltip is touch-native out of the box, so both chart components render their own
+persistent readout instead of the scaffold's hover tooltip: `CategoryDonut` selects a slice on tap
+(state, not a transient hover) and shows it in the donut's centre label plus a tappable legend;
+`SpendTrendChart` uses `pointerConfig` with `persistPointer` so a touch pins the readout until the
+next touch rather than it vanishing on release.
+
+Getting the trend chart right on-device took three iterations, worth recording so nobody re-treads
+them:
+1. **Instant-touch pointer + the library's own scroll** — didn't scroll or respond to touch at all.
+   `activatePointersInstantlyOnTouch` claims the touch responder on press-down, before a plain drag
+   can ever be read as a scroll, so neither gesture got through.
+2. **Hand-rolled scroll** (`disableScroll` + an external `ScrollView` wrapping the whole chart) —
+   fixed horizontal scroll, but broke two things: the y-axis scrolled off with the content (gifted-
+   charts normally renders it *outside* its own internal ScrollView, which this wrapping discarded),
+   and a hardcoded container height clipped the x-axis label row.
+3. **What shipped** — back to the library's own internal scroll (free sticky y-axis), with the
+   pointer gated to `activatePointersOnLongPress` instead of instant: a plain drag scrolls, a
+   long-press-then-drag inspects. An `nestedScrollEnabled` + `showScrollIndicator` pair on the chart
+   is enough since the Dashboard's outer `ScrollView` no longer needs to cooperate with it — see
+   below.
+
+One more dead end along the way: swapping both the chart's and the Dashboard's `ScrollView` for
+`react-native-gesture-handler`'s (plus adding the `GestureHandlerRootView` it requires) was tried to
+fix vertical-scroll-over-the-chart specifically, and didn't — reverted. **The chart's horizontal
+scroll and the Dashboard's vertical scroll do not currently cooperate when a touch starts directly
+over the chart**; touching the chart always resolves to the chart's own gesture. Revisit only if a
+user actually reports this as a problem — it wasn't worth chasing further blind.
+
+The y-axis also needed an explicit `maxValue`: gifted-charts doesn't pad above the highest data
+point by default, so a value near the computed ceiling would render at or past the top of the chart,
+invisible. `niceAxisMax()` in `SpendTrendChart.tsx` pads 15% and rounds to a clean gridline number.
+
+### 1.10 Dashboard aggregates locally instead of adding a second `/summary` call
+
+The donut and the budget balance both need the *current period's* totals, and the trend chart needs
+the *trailing twelve months'* — but `GET /summary/monthly` already returns every category row for
+all twelve months, and the selected period is always inside that window (`mostRecentPeriodWithData`
+never picks a period the monthly response doesn't contain). So the Dashboard makes exactly one
+`/summary/monthly?rollup=false` call and derives everything else from it client-side
+(`lib/dashboardStats.ts`): the donut groups leaf rows into their root category with `tree.rootOf()`,
+matching `categoryColor`'s "child is a shade of its parent" model, rather than requesting
+`rollup=true` separately.
+
+### 1.11 Budget buckets pulled forward into Phase 5, ahead of the rest of Phase 6
+
+The scaffold's Dashboard treats the balance card and budget-bucket bars as part of the Dashboard,
+not the Budget tab, so building the Dashboard honestly required a minimal `src/store/budgets.tsx`
+and a working `(tabs)/budget.tsx` now rather than leaving them for later — a Dashboard that can never
+show a budget isn't really done. What's *not* pulled forward: the onboarding bucket-allocation step
+and the Settings screen's "test connection" action, both still open under Phase 6 in §4.
+
 ---
 
 ## 2. Contract Corrections (verified against the running backend)
@@ -125,75 +188,45 @@ Additional live-data observations:
 
 ## 3. Implemented
 
-All of the below runs on an Android emulator against the live backend. `tsc --noEmit` is clean.
+Everything below is in the repo and passes `tsc --noEmit` + `expo lint` (configured for the first
+time this pass: `eslint.config.js`, `eslint` + `eslint-config-expo`). Transactions, onboarding and
+foundation are also confirmed against the live backend on an emulator; Dashboard/Budget/charts are
+confirmed for the pieces noted under the title, build-verified for the rest.
 
-### Foundation
-| File | Purpose |
-|---|---|
-| `src/theme/tokens.ts` | Light/dark palettes from `theme.css`, 12-colour category palette, spacing, font families, `tabularNums` |
-| `src/theme/ThemeProvider.tsx` | Theme from user preference (not OS scheme — the design presents it as a choice) |
-| `src/store/settings.tsx` | Prefs in AsyncStorage, server key in SecureStore, hydration gate, `clearCredentials()` for 403 recovery |
-| `src/app/_layout.tsx` | Providers, font loading, real splash gate, route guard (un-onboarded users cannot reach the tabs) |
-| `src/app/(tabs)/_layout.tsx` | Four tabs with lucide icons and mono uppercase labels |
-
-### API layer
-| File | Purpose |
-|---|---|
-| `src/lib/api/types.ts` | Every wire shape; nothing narrowed to a union |
-| `src/lib/api/client.ts` | Factory (not a singleton — credentials change at runtime), `ApiError` / `ApiAuthError` / `ApiNetworkError`, XHR multipart upload with progress |
-| `src/lib/api/endpoints.ts` | One typed function per contract endpoint |
-| `src/lib/api/queryClient.ts` | Query keys, auth-aware retry policy, invalidation groups |
-| `src/hooks/useApi.ts` | Client memoised on base URL + key |
-
-### Pure logic (platform-agnostic, would survive a web client)
-| File | Purpose |
-|---|---|
-| `src/lib/money.ts` | Cents-only arithmetic, sign-aware formatting, `NON_SPEND_CATEGORIES` |
-| `src/lib/period.ts` | Local-calendar date maths (never `toISOString()`), presets → ranges, labels |
-| `src/lib/categoryTree.ts` | Flat list → tree, stem/leaf, `expand()`, uncategorised normalisation |
-| `src/lib/categoryColor.ts` | Deterministic hash → palette, hierarchy-aware lightness shifts |
-
-### Components and screens
-| File | Purpose |
-|---|---|
-| `src/components/base.tsx` | `Sans`/`Mono`/`Eyebrow`, `Card`, `Button`, `Field`, `Loading`, `EmptyState`, `ErrorState` |
-| `src/components/Select.tsx` | Modal picker with swatches, indentation, stem hints |
-| `src/components/CategoryChip.tsx` | Nullable-safe category chip |
-| `src/app/onboarding.tsx` | Welcome + connection steps, live key validation, emulator-aware error hints |
-| `src/app/(tabs)/transactions.tsx` | **Complete** — period/category filters, stem expansion, exact counts, sign-aware rows, pending flag |
-
-### Scaffold bugs fixed rather than ported
-- `Field` and `Dropdown` were declared **inside** the render bodies of the scaffold's onboarding,
-  settings and transactions screens. Every keystroke created a new component type, remounting the
-  input and dropping focus — on mobile that also dismisses the keyboard on each character. All are
-  now module-scope. Verified: a 9-character name types without losing focus.
-- Dropdowns that never closed on outside click are now `Modal`s, which handle dismissal themselves.
-- The fake 1.6-second splash timer is now a real gate on fonts + storage hydration.
-- Hardcoded `"2026-08"` / `"AUGUST 2026"` / a fixed 2026–2027 month list are gone.
+- **Foundation** — theme tokens + light/dark provider (user preference, not OS scheme); settings and
+  budgets stores (AsyncStorage, hydration-gated, secrets in `expo-secure-store`); root layout with
+  font loading, a real splash gate, and an onboarding route guard.
+- **API layer** (`lib/api/`, `hooks/`) — one typed function per contract endpoint, a client factory
+  (not a singleton, since credentials change at runtime) distinguishing `ApiAuthError` from network
+  failures, XHR-based multipart upload for future import progress, and React Query hooks for
+  categories, transactions, and the 12-month summary.
+- **Pure logic** (`lib/`, platform-agnostic) — `money`, `period`, `categoryTree`, `categoryColor`,
+  `budget` (scope precedence + bucket reconciliation), `dashboardStats` (chart aggregation). This is
+  the highest-leverage place for tests — see §4.
+- **Screens** — onboarding (live key validation); **Transactions** (complete: filters, stem
+  expansion, exact counts, sign-aware rows); **Dashboard** (balance card, category donut, scroll/
+  long-press-inspect trend chart, budget bucket bars, defaults to the most recent period with data);
+  **Budget** (config CRUD — scope, total, per-category buckets against the live taxonomy).
+- **Scaffold bugs fixed rather than ported** — `Field`/`Dropdown` moved to module scope (they were
+  declared inside render bodies, remounting and dropping focus on every keystroke); blocking
+  dropdowns replaced with dismissable `Modal`s; the fake splash timer replaced with a real hydration
+  gate; hardcoded `"2026-08"` / a fixed 2026–2027 month list removed in favour of computed ranges.
 
 ---
 
 ## 4. Remaining
 
-Ordered as intended. Phases 4–5 are best done after a `POST /categorise` run — with every row
-uncategorised, a donut chart of one grey slice verifies nothing.
+Phases 4–5 are done (§3, §1.9–1.11) but need an on-device re-verification pass against the live
+backend before being trusted — see the note under the title. **They still need a `POST /categorise`
+run against real data first**: with every row uncategorised, the donut is one grey "Uncategorised"
+slice and verifies nothing about the category-grouping logic.
 
-### Phase 4 — Charts
-Category donut and 12-month trend line. Library not yet chosen: `victory-native` XL (Skia-backed,
-bundled in Expo Go, strong gesture support) or `react-native-gifted-charts` (lighter, only needs
-`react-native-svg`). **Both chart tooltips must be redesigned** — the scaffold's are hover-driven
-and there is no hover on touch; they need tap-to-select with a persistent readout.
-
-### Phase 5 — Dashboard
-Balance card, donut, trend, budget bars. Must:
-- default to the most recent period **with data** (see §2)
-- exclude income/transfers from "total spent" via `isSpendCategory()`
-- use `magnitude()` for chart values — negative slices render unpredictably
-
-### Phase 6 — Budget + Settings
-`src/store/budgets.tsx`, `resolveBudget(configs, period)` with `month > period > continuous`
-precedence, bucket-key reconciliation against live categories, the onboarding bucket-allocation
-step, and a Settings screen with a "test connection" action.
+### Phase 6 — Settings, and the rest of Budget
+Budget config CRUD (`src/store/budgets.tsx`, `(tabs)/budget.tsx`, `resolveBudget` precedence,
+bucket-key reconciliation) is done — see §1.11. Still open:
+- the onboarding bucket-allocation step (budgets can currently only be set after onboarding, from
+  the Budget tab)
+- a Settings screen with a "test connection" action (`(tabs)/settings.tsx` is still the 18-line stub)
 
 ### Phase 7 — Import
 Blocked on the backend's multipart `/ingest`. `expo-document-picker` → `FormData` with
@@ -211,9 +244,11 @@ Query-cache persistence to AsyncStorage, `onlineManager` ← NetInfo, `focusMana
 
 ### Cross-cutting, not yet started
 - **Tests.** None exist. Plan: `jest-expo` + `@testing-library/react-native`, MSW v2 (`msw/native`).
-  Highest value first: `money`, `period`, `categoryColor`, `categoryTree`, `budget`; then contract
-  fixtures for the degenerate cases (`categorised: {}`, `category: null`, positive amounts, 401/403,
-  empty summary); then a focus-retention regression test; then Maestro for ~4 E2E flows.
+  Highest value first: `money`, `period`, `categoryColor`, `categoryTree`, `budget`,
+  `dashboardStats` — `resolveBudget`'s scope precedence and `mostRecentPeriodWithData` are the two
+  most likely to have an off-by-one nobody notices without a test; then contract fixtures for the
+  degenerate cases (`categorised: {}`, `category: null`, positive amounts, 401/403, empty summary);
+  then a focus-retention regression test; then Maestro for ~4 E2E flows.
 - **Global 403 handling.** `ApiAuthError` is typed and thrown, but nothing yet subscribes to the
   query cache to clear credentials and route back to onboarding.
 - **Android cleartext HTTP.** Works in Expo Go; a standalone/dev build over plain `http://` will
