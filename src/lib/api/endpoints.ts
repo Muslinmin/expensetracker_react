@@ -4,6 +4,7 @@ import type {
   CategoriseStats,
   CreateCategoryResponse,
   DeleteCategoryResponse,
+  IngestJob,
   IngestResponse,
   Period,
   SummaryRow,
@@ -15,12 +16,15 @@ export const DEFAULT_PAGE_SIZE = 50;
 
 export const endpoints = {
   /**
-   * Multipart CSV/PDF upload. The response keeps the `{files, categorised}`
-   * object shape documented for the inbox-scanning version of this endpoint,
-   * with `files` holding a single entry for the uploaded file.
+   * Multipart CSV upload. Returns as soon as the (fast, DB-only) insert phase
+   * is done — categorisation runs as a background job; poll `ingestJob` with
+   * the returned `job_id` for its outcome.
    */
   ingest: (api: Api, file: UploadFile, onProgress?: (pct: number) => void) =>
     api.upload<IngestResponse>('/ingest', file, onProgress),
+
+  /** Poll for a background categorisation job kicked off by `ingest`. */
+  ingestJob: (api: Api, jobId: string) => api.get<IngestJob>(`/ingest/jobs/${jobId}`),
 
   /** Standalone re-run of the categorisation pipeline. No body. */
   categorise: (api: Api) => api.post<CategoriseStats>('/categorise'),

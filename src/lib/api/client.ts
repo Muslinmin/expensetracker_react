@@ -126,7 +126,7 @@ export function createApi(baseUrl: string, serverKey: string): Api {
     upload: (path, file, onProgress) =>
       new Promise((resolve, reject) => {
         const form = new FormData();
-        form.append('file', {
+        form.append('files', {
           uri: file.uri,
           name: file.name,
           type: file.mimeType,

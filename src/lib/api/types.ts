@@ -64,8 +64,20 @@ export interface IngestFileResult {
 
 export interface IngestResponse {
   files: IngestFileResult[];
-  /** `{}` when the categorisation step itself failed; ingest still committed. */
-  categorised: CategoriseStats | Record<string, never>;
+  /** Background categorisation job kicked off for whatever this ingest inserted. */
+  job_id: string;
+  status_url: string;
+}
+
+export type IngestJobState = 'pending' | 'running' | 'completed' | 'failed';
+
+export interface IngestJob {
+  job_id: string;
+  status: IngestJobState;
+  /** Populated once `status` is `'completed'`. */
+  result: CategoriseStats | null;
+  /** Populated once `status` is `'failed'`. */
+  error: string | null;
 }
 
 export interface CreateCategoryResponse {
@@ -95,11 +107,6 @@ export interface TransactionQuery {
   category?: string;
   retrieve_limit?: number;
   offset?: number;
-}
-
-/** True when `/ingest` reported rows but categorisation returned `{}`. */
-export function categorisationFailed(r: IngestResponse): boolean {
-  return Object.keys(r.categorised).length === 0;
 }
 
 export function ingestInsertedCount(r: IngestResponse): number {

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Wallet } from 'lucide-react-native';
-import { ScrollView, View } from 'react-native';
+import { useRouter } from 'expo-router';
+import { Upload, Wallet } from 'lucide-react-native';
+import { Pressable, ScrollView, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { CategoryDonut } from '@/components/charts/CategoryDonut';
@@ -35,6 +36,7 @@ const TREND_SPANS = [
 
 export default function DashboardScreen() {
   const { c } = useTheme();
+  const router = useRouter();
   const { prefs } = useSettings();
   const { tree, isLoading: catsLoading } = useCategories();
   const { data: monthlyRows, isLoading: summaryLoading, error, refetch } = useMonthlySummary(false);
@@ -249,6 +251,29 @@ export default function DashboardScreen() {
           ) : null}
         </ScrollView>
       )}
+
+      <Pressable
+        onPress={() => router.push('/import')}
+        hitSlop={8}
+        style={({ pressed }) => ({
+          position: 'absolute',
+          right: space.lg,
+          bottom: space.xl,
+          width: 56,
+          height: 56,
+          borderRadius: 28,
+          backgroundColor: c.primary,
+          alignItems: 'center',
+          justifyContent: 'center',
+          opacity: pressed ? 0.85 : 1,
+          shadowColor: '#000',
+          shadowOffset: { width: 0, height: 2 },
+          shadowOpacity: 0.2,
+          shadowRadius: 6,
+          elevation: 4,
+        })}>
+        <Upload size={22} color={c.primaryForeground} />
+      </Pressable>
     </SafeAreaView>
   );
 }
