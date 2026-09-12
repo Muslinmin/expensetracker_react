@@ -13,8 +13,12 @@ Every endpoint on every router requires a Bearer token:
 Authorization: Bearer <FAST_API_KEY>
 ```
 
-Missing or wrong token → `403 Forbidden`, no body. There is no separate login flow — the token is
-a single shared secret provisioned out of band (the server's `.env`).
+Missing token → `401 {"detail": "Not authenticated"}` (FastAPI's `HTTPBearer` default). Present
+but wrong token → `403 Forbidden`, no body. There is no separate login flow — the token is a single
+shared secret provisioned out of band (the server's `.env`).
+
+There is no CORS middleware. Native clients are unaffected; a browser-hosted client on a different
+origin would fail the preflight and needs `CORSMiddleware` added server-side first.
 
 ## Conventions
 
@@ -34,14 +38,16 @@ a single shared secret provisioned out of band (the server's `.env`).
 
 ## `POST /ingest`
 
-Ingests one or more CSV files sent directly in the request, then automatically runs categorisation
-on whatever became uncategorised as a result — one call does both.
+Ingests one or more CSV files sent directly in the request. The upload phase (parse, dedupe,
+insert, recompute summaries) is synchronous and DB-only, so it returns quickly. Categorisation of
+the newly inserted rows depends on an external LLM provider with unbounded latency, so it runs as
+a **background job** after the response is sent — poll `GET /ingest/jobs/{job_id}` for its outcome.
 
-**Request:** `multipart/form-data`, one or more files under the `files` field. Every uploaded file
-is archived server-side afterward (filename suffixed `_pass`/`_failed` to record the outcome) —
-there is no server-side watched folder to drop files into anymore.
+**Request:** `multipart/form-data`, one or more files under the `files` field. Nothing is retained
+server-side: each upload is staged to a temp directory for parsing and discarded once the request
+completes. There is no archive and no watched inbox folder.
 
-**Response `200`:**
+**Response `202 Accepted`** with a `Location: /ingest/jobs/{job_id}` header:
 
 ```json
 {
@@ -49,7 +55,39 @@ there is no server-side watched folder to drop files into anymore.
     {"file": "march.csv", "status": "ok", "inserted": 47, "skipped": 0},
     {"file": "bad.csv", "status": "failed", "error": "Records are empty ! []"}
   ],
-  "categorised": {
+  "job_id": "3f1c9a0e-5d2b-4c8e-9a7f-0b1c2d3e4f5a",
+  "status_url": "/ingest/jobs/3f1c9a0e-5d2b-4c8e-9a7f-0b1c2d3e4f5a"
+}
+```
+
+- `files` is empty (`[]`) if no files were sent (FastAPI actually rejects a request with no `files`
+  part with `422`, so in practice a client always sends at least one).
+- A file whose name doesn't end in `.csv` is reported as a `"failed"` entry (`"error": "Not a CSV
+  file: <name>"`) rather than being silently ignored. Validation is by extension only; the MIME
+  type of the part is not checked.
+- The parser expects the bank's export layout: a preamble, then a header row containing
+  `Transaction Date`, `Transaction Code`, `Description`, `Transaction Ref1..3`, `Status`,
+  `Debit Amount`, `Credit Amount`, with dates formatted like `20 May 2026`. Any other layout fails
+  that file with `"Headers are empty !"`.
+- `skipped` counts rows already held by the database. Dedupe is per-fingerprint count
+  reconciliation, so re-uploading the same export is a success with `inserted: 0`, not an error.
+- Each file is committed independently: one bad file never rolls back another that succeeded.
+- A job is always created, even if every file failed. In that case the job completes almost
+  immediately with `rows: 0` and makes no LLM call.
+- Money values inside newly-inserted rows aren't returned here — call `GET /transactions` /
+  `GET /summary` afterward to read the actual data.
+
+## `GET /ingest/jobs/{job_id}`
+
+Poll for the categorisation job kicked off by `POST /ingest`.
+
+**Response `200`:**
+
+```json
+{
+  "job_id": "3f1c9a0e-5d2b-4c8e-9a7f-0b1c2d3e4f5a",
+  "status": "completed",
+  "result": {
     "rows": 47,
     "resolved_by_rules": 12,
     "resolved_unknown_no_key": 0,
@@ -59,23 +97,32 @@ there is no server-side watched folder to drop files into anymore.
     "resolved_by_llm": 8,
     "llm_batches_attempted": 1,
     "llm_batches_failed": 0
-  }
+  },
+  "error": null
 }
 ```
 
-- `files` is empty (`[]`) if no files were sent.
-- A file whose name doesn't end in `.csv` is reported as a `"failed"` entry (`"error": "Not a CSV
-  file: <name>"`) rather than being silently ignored.
-- `categorised` can be `{}` if the categorisation step itself failed unexpectedly (network/provider
-  outage, misconfiguration) — **this never affects `files`**: ingest results are committed and
-  files archived regardless of whether categorisation succeeds.
-- Money values inside newly-inserted rows aren't returned here — call `GET /transactions` /
-  `GET /summary` afterward to read the actual data.
+- `status` is one of `pending` | `running` | `completed` | `failed`. While `pending` or `running`
+  the response carries a `Retry-After: 3` header; poll at that cadence.
+- `result` is populated only once `status` is `completed`; `error` only once `failed`. Both are
+  `null` otherwise.
+- `result.llm_batches_failed > 0` on a `completed` job means some rows are still uncategorised
+  (a per-batch provider failure is caught and counted, not raised). `POST /categorise` backfills
+  them.
+- A job goes to `failed` in three ways: an unexpected exception in the categoriser
+  (`"unexpected failure during categorisation"`); the server restarting mid-job
+  (`"interrupted by server restart"`, reconciled at startup); or no progress for over 10 minutes
+  while `running` (`"stale: no progress detected"`, detected lazily on the next poll). Either way
+  a client always converges to a terminal status — but keep a client-side attempt cap regardless.
+- **Ingest results are never affected by a failed job.** The rows from `files` are already
+  committed before the job starts; a failed job just leaves them with `category: null`.
+- Unknown `job_id` → `404 {"detail": "Job not found"}`.
 
-> **Breaking change note:** this endpoint used to take no request body (it scanned a server-side
-> inbox folder) and return a bare JSON array. It now requires a `multipart/form-data` body with the
-> file(s) to ingest, and the response is an object — any existing client needs to be updated both to
-> send files and to read `response.files` instead of treating the response as a list.
+> **Breaking change history:** this endpoint originally took no request body (it scanned a
+> server-side inbox folder) and returned a bare JSON array. It then moved to `multipart/form-data`
+> with a `200 {files, categorised}` response that blocked on categorisation. It now returns `202`
+> with a `job_id` instead of inline `categorised` stats — a client written against the `200` shape
+> must switch to polling the job endpoint to get those stats.
 
 ---
 
@@ -149,11 +196,15 @@ behaviour as `GET /summary`, one row per `(period, category)` combination across
 
 ## `POST /categorise`
 
-Standalone re-run of the same categorisation pipeline `POST /ingest` triggers automatically.
-Useful for backfilling rows that were never categorised (e.g. after a provider outage) without
-re-ingesting anything.
+Standalone re-run of the same categorisation pipeline `POST /ingest` triggers automatically, over
+every uncategorised row in the table (not scoped to one upload). Useful for backfilling rows that
+were never categorised (e.g. after a provider outage) without re-ingesting anything.
 
-**Request:** no body. **Response `200`:** the same stats object shown under `categorised` above.
+Unlike `POST /ingest`, this is **synchronous**: the request blocks until the LLM finishes, so use no
+client timeout.
+
+**Request:** no body. **Response `200`:** the same stats object shown under `result` in
+`GET /ingest/jobs/{job_id}` above.
 
 ---
 
@@ -249,8 +300,11 @@ The ones that actually affect client behavior:
   [Category Hierarchy](.agent/architecture_and_progress.md#category-hierarchy-v13) in the
   architecture doc. It has never run against the real (private) transaction history or a real LLM
   provider, only synthetic fixtures and a stub categoriser — see Known Gaps there.
-- `POST /ingest`'s request shape (now `multipart/form-data`) and response shape (now an object)
-  both changed (see the breaking-change note above).
-- LLM-driven categorisation may take a noticeable pause on the *first* `POST /ingest` after a large
-  backfill (many new merchants in one batch) — subsequent calls are fast (steady-state is usually
-  0–2 new merchants per import).
+- `POST /ingest` returns `202` and a `job_id`; categorisation stats come from polling
+  `GET /ingest/jobs/{job_id}` (see the breaking-change history above).
+- LLM-driven categorisation may take a noticeable pause on the *first* upload after a large
+  backfill (many new merchants in one batch). Because it runs as a background job this no longer
+  holds the `POST /ingest` response open, but the job will sit in `running` for that long —
+  subsequent uploads are fast (steady-state is usually 0–2 new merchants per import).
+- Jobs run in-process, not in a queue. A server restart fails any job in flight; the rows it was
+  categorising stay `category: null` until `POST /categorise` is run.

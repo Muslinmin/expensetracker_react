@@ -228,10 +228,14 @@ bucket-key reconciliation) is done — see §1.11. Still open:
   the Budget tab)
 - a Settings screen with a "test connection" action (`(tabs)/settings.tsx` is still the 18-line stub)
 
-### Phase 7 — Import
-Blocked on the backend's multipart `/ingest`. `expo-document-picker` → `FormData` with
-`{uri, name, type}` (an RN-specific shape; a Blob silently uploads nothing), real upload progress,
-result rendering, and handling of `categorised: {}`.
+### Phase 7 — Import (done)
+`app/import.tsx`, presented as a modal from the dashboard. `expo-document-picker` → `FormData` with
+`{uri, name, type}` (an RN-specific shape; a Blob silently uploads nothing) → XHR multipart upload
+with real progress → `202 {files, job_id}` → polls `GET /ingest/jobs/{job_id}` every 3s (matching
+the server's `Retry-After`) up to a 220-attempt cap, guarded by a generation counter so a stale poll
+loop can't clobber a new upload → renders per-file results and categorisation stats, with a
+`POST /categorise` retry when the job fails. Invalidates transactions/summary/categories on
+completion. Not yet verified on-device against the live backend.
 
 ### Phase 8 — Category management
 Carve / soft-delete / reassign. Deliberately last: it is the only screen that destructively
