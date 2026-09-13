@@ -13,11 +13,15 @@ import { ApiAuthError, ApiNetworkError, type UploadFile } from '@/lib/api/client
 import { endpoints } from '@/lib/api/endpoints';
 import { invalidateAfterDataChange } from '@/lib/api/queryClient';
 import { ingestInsertedCount, type CategoriseStats, type IngestResponse } from '@/lib/api/types';
+import { getOcrEngine } from '@/lib/ocr/registry';
+import type { ExtractedPage } from '@/lib/ocr/types';
 import { useTheme } from '@/theme/ThemeProvider';
 import { space } from '@/theme/tokens';
 
 type Status = 'idle' | 'picked' | 'uploading' | 'categorising' | 'done';
 type PickedFile = UploadFile & { size?: number };
+type PdfStatus = 'extracting' | 'done' | 'error';
+type PdfState = { name: string; status: PdfStatus; pages?: ExtractedPage[]; error?: string };
 
 /** Job poll cadence — matches the backend's `Retry-After: 3` on pending/running. */
 const POLL_INTERVAL_MS = 3000;
@@ -50,7 +54,7 @@ export default function ImportScreen() {
 
   const [status, setStatus] = useState<Status>('idle');
   const [file, setFile] = useState<PickedFile | null>(null);
-  const [pdfFile, setPdfFile] = useState<{ name: string } | null>(null);
+  const [pdfFile, setPdfFile] = useState<PdfState | null>(null);
   const [progress, setProgress] = useState(0);
   const [result, setResult] = useState<IngestResponse | null>(null);
   const [categoriseResult, setCategoriseResult] = useState<CategoriseStats | null>(null);
@@ -108,8 +112,9 @@ export default function ImportScreen() {
     setStatus('picked');
   }
 
-  // On-device OCR extraction isn't wired up yet — picking a PDF here just
-  // surfaces the filename so the entry point exists ahead of that work.
+  // Only the pdf.js (text-layer) engine is wired up so far — it reads a
+  // born-digital PDF's embedded text but comes back empty on a scanned one,
+  // which is the real, honest signal that OCR is still needed for that case.
   async function pickPdf() {
     setError(null);
     const picked = await DocumentPicker.getDocumentAsync({
@@ -117,7 +122,14 @@ export default function ImportScreen() {
       copyToCacheDirectory: false,
     });
     if (picked.canceled || !picked.assets?.[0]) return;
-    setPdfFile({ name: picked.assets[0].name });
+    const { name, uri } = picked.assets[0];
+    setPdfFile({ name, status: 'extracting' });
+    try {
+      const pages = await getOcrEngine('pdfjs').extractPdf(uri);
+      setPdfFile({ name, status: 'done', pages });
+    } catch (err) {
+      setPdfFile({ name, status: 'error', error: errorMessage(err) });
+    }
   }
 
   async function upload() {
@@ -374,9 +386,36 @@ export default function ImportScreen() {
             <Sans size={13} weight="semibold" numberOfLines={1} style={{ textAlign: 'center' }}>
               {pdfFile.name}
             </Sans>
-            <Sans tone="muted" style={{ textAlign: 'center' }}>
-              PDF statement import is still being built — for now, export a CSV from your bank instead.
-            </Sans>
+            {pdfFile.status === 'extracting' ? (
+              <>
+                <ActivityIndicator color={c.primary} />
+                <Sans tone="muted">Reading the PDF&apos;s text…</Sans>
+              </>
+            ) : pdfFile.status === 'error' ? (
+              <Sans size={12} tone="destructive" style={{ textAlign: 'center' }}>
+                {pdfFile.error}
+              </Sans>
+            ) : (pdfFile.pages?.reduce((n, p) => n + p.lines.length, 0) ?? 0) > 0 ? (
+              <Card style={{ gap: space.sm, width: '100%' }}>
+                <Eyebrow>Text-layer preview</Eyebrow>
+                <Sans size={12} tone="muted">
+                  {pdfFile.pages?.length} page{pdfFile.pages?.length === 1 ? '' : 's'},{' '}
+                  {pdfFile.pages?.reduce((n, p) => n + p.lines.length, 0)} lines found. Turning this into
+                  transactions isn&apos;t wired up yet — this only confirms extraction works.
+                </Sans>
+                <Mono size={10} tone="muted" numeric={false} numberOfLines={6}>
+                  {pdfFile.pages?.[0]?.lines
+                    .slice(0, 6)
+                    .map(l => l.text)
+                    .join('\n')}
+                </Mono>
+              </Card>
+            ) : (
+              <Sans tone="muted" style={{ textAlign: 'center' }}>
+                No text layer found — this looks like a scanned PDF. On-device OCR for that case isn&apos;t
+                wired up yet; export a CSV from your bank instead.
+              </Sans>
+            )}
             <Button title="Choose CSV File" onPress={pickFile} />
             <Pressable onPress={() => setPdfFile(null)} hitSlop={12}>
               <Sans size={13} tone="muted">

@@ -18,6 +18,7 @@ import { View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { queryClient } from '@/lib/api/queryClient';
+import { PdfJsBridgeHost } from '@/lib/ocr/pdfjsBridge';
 import { AuthProvider, useAuth } from '@/store/auth';
 import { BudgetsProvider } from '@/store/budgets';
 import { SettingsProvider, useSettings } from '@/store/settings';
@@ -109,6 +110,7 @@ export default function RootLayout() {
             <QueryClientProvider client={queryClient}>
               <BudgetsProvider>
                 <RootNavigator />
+                <PdfJsBridgeHost />
               </BudgetsProvider>
             </QueryClientProvider>
           </AppThemeProvider>
