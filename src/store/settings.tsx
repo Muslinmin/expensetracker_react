@@ -1,12 +1,16 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as SecureStore from 'expo-secure-store';
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
 import type { ThemeName } from '@/theme/tokens';
 
 const PREFS_KEY = 'xpns.prefs.v1';
-/** SecureStore keys may only contain alphanumerics, ".", "-" and "_". */
-const SERVER_KEY = 'xpns_server_key';
+
+/**
+ * Credentials no longer live here. This holds only non-secret preferences —
+ * name, theme, which backend to talk to. The Supabase session and the data key
+ * are in `@/store/auth`, in the device keystore rather than AsyncStorage,
+ * which is plain unencrypted files.
+ */
 
 export interface Prefs {
   name: string;
@@ -30,33 +34,23 @@ export const DEFAULT_PREFS: Prefs = {
 
 interface SettingsValue {
   prefs: Prefs;
-  /** The shared bearer secret. Kept out of `prefs` so it never lands in AsyncStorage. */
-  serverKey: string;
   hydrated: boolean;
   setPrefs: (patch: Partial<Prefs>) => Promise<void>;
-  setServerKey: (key: string) => Promise<void>;
-  /** Wipes the key and un-onboards — used when the API answers 403. */
-  clearCredentials: () => Promise<void>;
 }
 
 const SettingsContext = createContext<SettingsValue | null>(null);
 
 export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const [prefs, setPrefsState] = useState<Prefs>(DEFAULT_PREFS);
-  const [serverKey, setServerKeyState] = useState('');
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [raw, key] = await Promise.all([
-          AsyncStorage.getItem(PREFS_KEY),
-          SecureStore.getItemAsync(SERVER_KEY).catch(() => null),
-        ]);
+        const raw = await AsyncStorage.getItem(PREFS_KEY);
         if (cancelled) return;
         if (raw) setPrefsState({ ...DEFAULT_PREFS, ...JSON.parse(raw) });
-        if (key) setServerKeyState(key);
       } catch {
         // Corrupt storage shouldn't brick the app — fall through to defaults.
       } finally {
@@ -76,24 +70,9 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const setServerKey = useCallback(async (key: string) => {
-    setServerKeyState(key);
-    await SecureStore.setItemAsync(SERVER_KEY, key).catch(() => {});
-  }, []);
-
-  const clearCredentials = useCallback(async () => {
-    setServerKeyState('');
-    await SecureStore.deleteItemAsync(SERVER_KEY).catch(() => {});
-    setPrefsState(prev => {
-      const next = { ...prev, onboarded: false };
-      AsyncStorage.setItem(PREFS_KEY, JSON.stringify(next)).catch(() => {});
-      return next;
-    });
-  }, []);
-
   const value = useMemo<SettingsValue>(
-    () => ({ prefs, serverKey, hydrated, setPrefs, setServerKey, clearCredentials }),
-    [prefs, serverKey, hydrated, setPrefs, setServerKey, clearCredentials],
+    () => ({ prefs, hydrated, setPrefs }),
+    [prefs, hydrated, setPrefs],
   );
 
   return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>;

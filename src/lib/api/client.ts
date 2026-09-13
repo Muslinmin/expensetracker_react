@@ -1,7 +1,14 @@
 /**
  * Thin fetch wrapper. Deliberately a factory rather than a module singleton:
- * base URL and bearer key both come from user settings and can change at
- * runtime, and a singleton would strand stale credentials in the closure.
+ * the base URL, the access token and the data key all change at runtime — the
+ * token on every refresh — and a singleton would strand stale credentials in
+ * the closure.
+ *
+ * Two headers, two different jobs. `Authorization` proves who is calling and
+ * is what the backend scopes the database to. `X-Data-Key` is the key that
+ * decrypts what comes back, and the server keeps it only for the life of the
+ * request. Neither substitutes for the other: a request with a token and no
+ * key reaches the right rows and cannot read them.
  */
 
 /** Any non-2xx from the API. */
@@ -26,8 +33,24 @@ export class ApiError extends Error {
  */
 export class ApiAuthError extends ApiError {
   constructor(status: 401 | 403 = 403) {
-    super(status, status === 401 ? 'No server key supplied' : 'Server key rejected');
+    super(
+      status,
+      status === 401 ? 'Not signed in, or the session expired' : 'Access denied',
+    );
     this.name = 'ApiAuthError';
+  }
+}
+
+/**
+ * The request needed the data key and did not have a usable one (HTTP 400 from
+ * the X-Data-Key dependency). Distinct from an auth failure on purpose: the
+ * session is fine, so the UI should ask for the password to unlock rather than
+ * throw the user back to a login screen.
+ */
+export class ApiLockedError extends ApiError {
+  constructor(detail = 'This device is locked — unlock with your password') {
+    super(400, detail);
+    this.name = 'ApiLockedError';
   }
 }
 
@@ -71,6 +94,17 @@ function buildQuery(params?: Record<string, unknown>): string {
 
 async function toError(res: Response): Promise<ApiError> {
   if (isAuthStatus(res.status)) return new ApiAuthError(res.status);
+  if (res.status === 400) {
+    // The backend answers 400 for a missing or malformed X-Data-Key. Worth
+    // separating from other 400s so the UI can prompt to unlock.
+    let detail = '';
+    try {
+      detail = (await res.clone().json())?.detail ?? '';
+    } catch {
+      /* fall through to the generic path */
+    }
+    if (detail.includes('X-Data-Key')) return new ApiLockedError(detail);
+  }
   // FastAPI's default error shape is {"detail": "..."} — but a 500 from a
   // proxy or a crash can be HTML, so never assume the body parses.
   let detail = `Request failed (${res.status})`;
@@ -83,16 +117,27 @@ async function toError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, detail);
 }
 
-export function createApi(baseUrl: string, serverKey: string): Api {
+export interface Credentials {
+  /** Supabase access token. */
+  accessToken: string;
+  /** Base64 of the 32-byte data key, or null when locked. */
+  dataKey: string | null;
+}
+
+export function createApi(baseUrl: string, credentials: Credentials): Api {
   const root = baseUrl.replace(/\/+$/, '');
-  const authHeader = { Authorization: `Bearer ${serverKey}` };
+  const { accessToken, dataKey } = credentials;
+  const authHeaders: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+    ...(dataKey ? { 'X-Data-Key': dataKey } : {}),
+  };
 
   async function request<T>(path: string, init: RequestInit): Promise<T> {
     let res: Response;
     try {
       res = await fetch(`${root}${path}`, {
         ...init,
-        headers: { ...authHeader, ...(init.headers ?? {}) },
+        headers: { ...authHeaders, ...(init.headers ?? {}) },
       });
     } catch (e) {
       throw new ApiNetworkError(e);
@@ -134,7 +179,9 @@ export function createApi(baseUrl: string, serverKey: string): Api {
 
         const xhr = new XMLHttpRequest();
         xhr.open('POST', `${root}${path}`);
-        xhr.setRequestHeader('Authorization', `Bearer ${serverKey}`);
+        for (const [name, value] of Object.entries(authHeaders)) {
+          xhr.setRequestHeader(name, value);
+        }
         // No timeout: the contract warns the first ingest after a backfill can
         // pause while the LLM categorises a large batch of new merchants.
         xhr.timeout = 0;

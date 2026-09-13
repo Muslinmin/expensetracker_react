@@ -1,4 +1,4 @@
-import { Eye, EyeOff, Moon, Sun, TrendingDown } from 'lucide-react-native';
+import { Moon, Sun, TrendingDown } from 'lucide-react-native';
 import { useState } from 'react';
 import {
   KeyboardAvoidingView,
@@ -11,8 +11,6 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Button, Eyebrow, Field, Mono, Sans } from '@/components/base';
-import { ApiAuthError, ApiNetworkError, createApi } from '@/lib/api/client';
-import { endpoints } from '@/lib/api/endpoints';
 import { DEFAULT_PREFS, useSettings } from '@/store/settings';
 import { useTheme } from '@/theme/ThemeProvider';
 import { type ThemeName, font, space } from '@/theme/tokens';
@@ -27,46 +25,47 @@ const FEATURES = [
 
 export default function Onboarding() {
   const { c } = useTheme();
-  const { prefs, setPrefs, setServerKey } = useSettings();
+  const { prefs, setPrefs } = useSettings();
   const [step, setStep] = useState<Step>('welcome');
 
   const [name, setName] = useState(prefs.name);
   const [baseUrl, setBaseUrl] = useState(prefs.apiBaseUrl || DEFAULT_PREFS.apiBaseUrl);
-  const [key, setKey] = useState('');
-  const [showKey, setShowKey] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [checking, setChecking] = useState(false);
 
   const setTheme = (t: ThemeName) => setPrefs({ theme: t });
 
   /**
-   * The scaffold accepted any non-empty string as a key, so a typo produced an
-   * app where every screen failed at once. We spend one round-trip proving the
-   * credentials work before letting the user through.
+   * One round-trip to prove the address is right before letting the user
+   * through — a typo here used to produce an app where every screen failed at
+   * once, with nothing pointing at the cause.
+   *
+   * /health rather than an authenticated endpoint: there are no credentials to
+   * check at this point. Signing in comes next, on its own screen, because the
+   * account now lives in Supabase rather than in a key pasted from the
+   * server's environment.
    */
   const finish = async () => {
     const next: Record<string, string> = {};
     if (!name.trim()) next.name = 'Required';
     if (!baseUrl.trim()) next.baseUrl = 'Required';
-    if (!key.trim()) next.key = 'Required';
     setErrors(next);
     if (Object.keys(next).length > 0) return;
 
     setChecking(true);
     try {
-      await endpoints.categories(createApi(baseUrl.trim(), key.trim()));
-      await setServerKey(key.trim());
+      const res = await fetch(`${baseUrl.trim().replace(/\/+$/, '')}/health`);
+      if (!res.ok) throw new Error(`Server answered ${res.status}`);
       await setPrefs({ name: name.trim(), apiBaseUrl: baseUrl.trim(), onboarded: true });
     } catch (e) {
-      if (e instanceof ApiAuthError) {
-        setErrors({ key: 'Server rejected this key' });
-      } else if (e instanceof ApiNetworkError) {
-        setErrors({
-          baseUrl: 'Could not reach this address. On an emulator use 10.0.2.2, not localhost.',
-        });
-      } else {
-        setErrors({ baseUrl: e instanceof Error ? e.message : 'Connection failed' });
-      }
+      setErrors({
+        baseUrl:
+          e instanceof TypeError
+            ? 'Could not reach this address. On an emulator use 10.0.2.2, not localhost.'
+            : e instanceof Error
+              ? e.message
+              : 'Connection failed',
+      });
     } finally {
       setChecking(false);
     }
@@ -152,8 +151,8 @@ export default function Onboarding() {
               Your server
             </Sans>
             <Sans tone="muted">
-              XPNS talks to your own backend. Point it at the address and paste the API key
-              from the server&apos;s environment.
+              XPNS talks to your own backend. Point it at the address — you&apos;ll sign in
+              with your account on the next screen.
             </Sans>
           </View>
 
@@ -179,27 +178,6 @@ export default function Onboarding() {
               autoCapitalize="none"
               autoCorrect={false}
               keyboardType="url"
-            />
-
-            <Field
-              label="Server API Key"
-              required
-              value={key}
-              onChangeText={setKey}
-              placeholder="paste FAST_API_KEY"
-              secureTextEntry={!showKey}
-              error={errors.key}
-              autoCapitalize="none"
-              autoCorrect={false}
-              accessory={
-                <Pressable onPress={() => setShowKey(s => !s)} hitSlop={10}>
-                  {showKey ? (
-                    <EyeOff size={16} color={c.mutedForeground} />
-                  ) : (
-                    <Eye size={16} color={c.mutedForeground} />
-                  )}
-                </Pressable>
-              }
             />
 
             <View style={{ gap: space.sm }}>
