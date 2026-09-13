@@ -7,15 +7,45 @@ design. For internal architecture, data model rationale, and known gaps, see
 
 ## Base URL & Auth
 
-Every endpoint on every router requires a Bearer token:
+Two headers, doing two different jobs. `/health`, `/docs` and `/openapi.json` need neither.
 
 ```
-Authorization: Bearer <FAST_API_KEY>
+Authorization: Bearer <supabase access token>
+X-Data-Key:    <base64 of the caller's 32-byte data key>
 ```
 
-Missing token → `401 {"detail": "Not authenticated"}` (FastAPI's `HTTPBearer` default). Present
-but wrong token → `403 Forbidden`, no body. There is no separate login flow — the token is a single
-shared secret provisioned out of band (the server's `.env`).
+**`Authorization`** is a Supabase Auth JWT, verified against the project's JWKS (or a shared
+secret on projects still signing symmetrically). `exp`, `aud` and `iss` are all enforced, so a
+token from a different Supabase project is refused. Missing or invalid → `401` with the same
+body every time, regardless of why. Required on every endpoint below.
+
+**`X-Data-Key`** is the key that decrypts the caller's own data. `description`, `vendor_name`
+and `merchant_key` are AES-256-GCM ciphertext at rest, and the server holds the key only for the
+life of the request. Malformed, or correct-looking but wrong, → `400` — deliberately not 401.
+The session is fine; the client should prompt to unlock rather than sign the user out. Both 400
+details mention `X-Data-Key`, which is the signal to distinguish them from other 400s.
+
+It is required lazily, at the moment an encrypted column is actually touched. `GET /summary`,
+`GET /categories`, `POST /categories`, `DELETE /categories/{name}` and `/keys` never touch one.
+`GET /transactions`, `POST /ingest` and `POST /categorise` do — except that a `/transactions`
+call matching zero rows decrypts nothing and succeeds either way. Don't rely on that.
+
+The client derives the key locally: Argon2id over the user's password gives a key-encryption
+key, which unwraps the data key fetched from `GET /keys`. Neither the password nor the derived
+key ever leaves the device, and the server cannot open what it stores.
+
+### Tenancy
+
+Every row is owned by a user, and the filtering is done by PostgreSQL row level security against
+the identity in the JWT. There is no endpoint or parameter that can reach another account's data.
+
+### `GET|POST|PUT /keys`
+
+Opaque key escrow. `GET` returns `{kdf_salt, kdf_params, wrapped_dek, recovery_wrapped_dek,
+updated_at}` (base64), or `404` if this account has never set a password for its data. `POST`
+creates it and `409`s rather than overwriting — replacing it would orphan every row the old key
+encrypted. `PUT` re-wraps after a password change; the data key underneath is unchanged, which
+is why a password change does not re-encrypt anything.
 
 There is no CORS middleware. Native clients are unaffected; a browser-hosted client on a different
 origin would fail the preflight and needs `CORSMiddleware` added server-side first.
