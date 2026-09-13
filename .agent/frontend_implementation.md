@@ -161,6 +161,21 @@ and a working `(tabs)/budget.tsx` now rather than leaving them for later — a D
 show a budget isn't really done. What's *not* pulled forward: the onboarding bucket-allocation step
 and the Settings screen's "test connection" action, both still open under Phase 6 in §4.
 
+### 1.12 OCR/PDF extraction: one `OcrEngine` interface, engines swapped in behind it
+
+PDF statement import needs OCR for scanned statements and can use cheaper text-layer extraction
+for born-digital ones — and which library wins on accuracy/speed/footprint is an open question
+being benchmarked, not a settled choice. So `src/lib/ocr/types.ts` defines a small `OcrEngine`
+interface (`id`, `label`, `isAvailable()`, `extractPdf()`) and `registry.ts` is the one place that
+maps an id to an implementation. The import screen and the future benchmark harness both call
+`getOcrEngine(id).extractPdf(uri)` — neither knows or cares which library is behind it. Adding an
+engine means writing one adapter and adding one line to the registry.
+
+`pdfjs` (`src/lib/ocr/engines/pdfjs.ts` + `pdfjsBridge.tsx`) is the first engine, and the only one
+that needs no native module — everything else on the shortlist (ML Kit, expo-pdf-text-extract,
+PaddleOCR) requires a custom dev client, so pdf.js is what's actually running in Expo Go today.
+See Phase 10 (§4) for how it works and the gotchas that cost the most time getting it there.
+
 ---
 
 ## 2. Contract Corrections (verified against the running backend)
@@ -245,6 +260,56 @@ real LLM provider. Needs the loudest confirmations in the app.
 ### Phase 9 — Offline and polish
 Query-cache persistence to AsyncStorage, `onlineManager` ← NetInfo, `focusManager` ← AppState,
 `KeyboardAvoidingView` on the form screens, pressed states, Reanimated transitions.
+
+### Phase 10 — PDF statement import (OCR) — in progress, branch `feat/pdf-ocr-import`
+
+Goal: pick a PDF bank statement, extract it entirely on-device (privacy requirement — raw
+statement bytes/images never leave the device unmasked), and feed the result through the same
+pipeline `/ingest` already accepts. Card numbers must never reach the server unmasked; see §1.12
+for why this is behind a swappable `OcrEngine` interface rather than one hardcoded library.
+
+**Done and verified on an Android emulator (2026-09-13):**
+- `Import PDF Statement` button on the import screen (`src/app/import.tsx`), alongside the existing
+  CSV picker.
+- The `pdfjs` engine (§1.12) end-to-end: a born-digital PDF returns its exact text, a scanned PDF
+  correctly reports "no text layer found" with no crash — the screen shows a text-layer preview or
+  that message accordingly. Turning extracted text into transactions is **not** wired up yet; this
+  only proves extraction works.
+
+**Gotchas that ate the debugging time, kept here so nobody re-discovers them the slow way:**
+1. **A 0×0 `<WebView>` gets throttled by Chromium and never runs its JS at all.** The hidden bridge
+   host must be a real but off-screen size (1×1, positioned off-screen) — not `width: 0, height: 0`
+   — or every message just hangs forever with zero error.
+2. **`<script type="module" src={blobUrl}>` silently never executes past the static `import`
+   line** on this Android WebView (148.x) — `onload` fires, no error fires, `window.pdfjsLib`
+   never gets set. Switching to dynamic `import(blobUrl)` with an explicit `.then/.catch` fixed it
+   outright. Don't use the static form for a blob-sourced module script here.
+3. **pdf.js 6.x hard-throws `No "GlobalWorkerOptions.workerSrc" specified"`** — there is no silent
+   main-thread fallback in this version (older pdf.js had one; assume it's gone). The worker
+   (`pdf.worker.min.mjs`, ~1.3MB) has to be bundled and set as a Blob URL same as the main library.
+4. **Metro does not pick up a brand-new file under `assets/` for an already-running dev server.**
+   Adding `pdfjs-worker.rawjs` after Metro had started produced a silent, permanent hang with zero
+   log output — not an error. A full `expo start --clear` restart was required. If a newly-added
+   asset "just hangs" with no error, restart Metro before debugging anything else.
+5. **The very first asset download after a cold Expo Go launch is flaky** (`ExpoAsset.downloadAsync`
+   rejects "Unable to download asset") but has reliably succeeded on an immediate retry every time
+   it's been hit. Looks like an Expo Go networking race on process start, not a code bug — don't
+   sink time into it, just retry once.
+6. Both pdf.js build files are bundled locally (`assets/vendor/pdfjs-main.rawjs`,
+   `pdfjs-worker.rawjs`, registered as a Metro asset extension in `metro.config.js`) and injected as
+   Blobs rather than fetched from a CDN — keeps extraction fully offline, no library-fetch network
+   dependency at runtime either.
+
+**Not started:**
+- The other three candidate engines — `@react-native-ml-kit/text-recognition`,
+  `expo-pdf-text-extract`, `ppu-paddle-ocr` — all need a native module, meaning `expo prebuild` and
+  a real dev-client build (no Expo Go). None of the packages are installed yet.
+- Benchmarking the engines against each other (speed/accuracy/footprint) — the actual reason for
+  the swappable-engine design — hasn't started; only `pdfjs` exists to benchmark against so far.
+- Turning extracted lines into transactions and posting to `/ingest` — today's PDF flow stops at a
+  preview, it inserts nothing.
+- iOS is completely unverified — this machine has no Xcode/Simulator; everything above was tested
+  on Android only.
 
 ### Cross-cutting, not yet started
 - **Tests.** None exist. Plan: `jest-expo` + `@testing-library/react-native`, MSW v2 (`msw/native`).
