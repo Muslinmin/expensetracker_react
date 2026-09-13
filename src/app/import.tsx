@@ -1,5 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query';
 import * as DocumentPicker from 'expo-document-picker';
+import { File as FsFile } from 'expo-file-system';
 import { useRouter } from 'expo-router';
 import { AlertCircle, CheckCircle2, FileSpreadsheet, Upload, X } from 'lucide-react-native';
 import { useRef, useState } from 'react';
@@ -61,15 +62,41 @@ export default function ImportScreen() {
 
   async function pickFile() {
     setError(null);
+    // copyToCacheDirectory is off deliberately. With it on, the picker reports
+    // a file:// URI under its own cache directory that does not actually
+    // exist — `new File(uri).exists` is false immediately after picking on
+    // Android 16 / Expo Go SDK 57 — and the upload then fails inside React
+    // Native's networking layer with "Could not retrieve file for uri". That
+    // surfaced to the user as "Could not reach the server", which sent anyone
+    // debugging it after the network instead of the file.
+    //
+    // With it off, the picker returns the provider's content:// URI, which
+    // ContentResolver opens directly and React Native's FormData handles.
+    //
+    // Verified on Android only — there is no iOS device here. On iOS this
+    // returns a URI into the originating app's sandbox rather than a copy, so
+    // if an import ever fails there, this flag is the first thing to revisit.
     const picked = await DocumentPicker.getDocumentAsync({
       type: ['text/csv', 'text/comma-separated-values', 'application/vnd.ms-excel', 'text/plain'],
-      copyToCacheDirectory: true,
+      copyToCacheDirectory: false,
     });
     if (picked.canceled || !picked.assets?.[0]) return;
     const asset = picked.assets[0];
     if (!asset.name.toLowerCase().endsWith('.csv')) {
       setError(`Not a CSV file: ${asset.name}`);
       return;
+    }
+
+    // Fail here, where the cause is knowable, rather than several seconds
+    // later as an indistinguishable network error.
+    try {
+      if (!new FsFile(asset.uri).exists) {
+        setError(`Could not read ${asset.name}. Try picking it again.`);
+        return;
+      }
+    } catch {
+      // Some providers hand back a URI this API cannot stat. That is not
+      // itself a failure — let the upload be the judge.
     }
     setFile({
       uri: asset.uri,
