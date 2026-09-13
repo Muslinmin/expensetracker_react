@@ -2,7 +2,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import * as DocumentPicker from 'expo-document-picker';
 import { File as FsFile } from 'expo-file-system';
 import { useRouter } from 'expo-router';
-import { AlertCircle, CheckCircle2, FileSpreadsheet, Upload, X } from 'lucide-react-native';
+import { AlertCircle, CheckCircle2, FileSpreadsheet, FileText, Upload, X } from 'lucide-react-native';
 import { useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -50,6 +50,7 @@ export default function ImportScreen() {
 
   const [status, setStatus] = useState<Status>('idle');
   const [file, setFile] = useState<PickedFile | null>(null);
+  const [pdfFile, setPdfFile] = useState<{ name: string } | null>(null);
   const [progress, setProgress] = useState(0);
   const [result, setResult] = useState<IngestResponse | null>(null);
   const [categoriseResult, setCategoriseResult] = useState<CategoriseStats | null>(null);
@@ -105,6 +106,18 @@ export default function ImportScreen() {
       size: asset.size ?? undefined,
     });
     setStatus('picked');
+  }
+
+  // On-device OCR extraction isn't wired up yet — picking a PDF here just
+  // surfaces the filename so the entry point exists ahead of that work.
+  async function pickPdf() {
+    setError(null);
+    const picked = await DocumentPicker.getDocumentAsync({
+      type: 'application/pdf',
+      copyToCacheDirectory: false,
+    });
+    if (picked.canceled || !picked.assets?.[0]) return;
+    setPdfFile({ name: picked.assets[0].name });
   }
 
   async function upload() {
@@ -346,6 +359,31 @@ export default function ImportScreen() {
               <Button title="Choose Different File" variant="outline" onPress={pickFile} />
             </View>
           </>
+        ) : pdfFile ? (
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: space.lg }}>
+            <View
+              style={{
+                width: 56,
+                height: 56,
+                backgroundColor: c.secondary,
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}>
+              <FileText size={26} color={c.primary} />
+            </View>
+            <Sans size={13} weight="semibold" numberOfLines={1} style={{ textAlign: 'center' }}>
+              {pdfFile.name}
+            </Sans>
+            <Sans tone="muted" style={{ textAlign: 'center' }}>
+              PDF statement import is still being built — for now, export a CSV from your bank instead.
+            </Sans>
+            <Button title="Choose CSV File" onPress={pickFile} />
+            <Pressable onPress={() => setPdfFile(null)} hitSlop={12}>
+              <Sans size={13} tone="muted">
+                Dismiss
+              </Sans>
+            </Pressable>
+          </View>
         ) : (
           <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: space.lg }}>
             <View
@@ -366,7 +404,10 @@ export default function ImportScreen() {
                 {error}
               </Sans>
             ) : null}
-            <Button title="Choose CSV File" onPress={pickFile} />
+            <View style={{ gap: space.sm }}>
+              <Button title="Choose CSV File" onPress={pickFile} />
+              <Button title="Import PDF Statement" variant="outline" onPress={pickPdf} />
+            </View>
           </View>
         )}
       </ScrollView>
