@@ -21,7 +21,13 @@ import { space } from '@/theme/tokens';
 type Status = 'idle' | 'picked' | 'uploading' | 'categorising' | 'done';
 type PickedFile = UploadFile & { size?: number };
 type PdfStatus = 'extracting' | 'done' | 'error';
-type PdfState = { name: string; status: PdfStatus; pages?: ExtractedPage[]; error?: string };
+type PdfState = {
+  name: string;
+  status: PdfStatus;
+  pages?: ExtractedPage[];
+  engineLabel?: string;
+  error?: string;
+};
 
 /** Job poll cadence — matches the backend's `Retry-After: 3` on pending/running. */
 const POLL_INTERVAL_MS = 3000;
@@ -112,9 +118,9 @@ export default function ImportScreen() {
     setStatus('picked');
   }
 
-  // Only the pdf.js (text-layer) engine is wired up so far — it reads a
-  // born-digital PDF's embedded text but comes back empty on a scanned one,
-  // which is the real, honest signal that OCR is still needed for that case.
+  // pdf.js reads a born-digital PDF's embedded text layer almost instantly;
+  // a scanned PDF comes back with zero lines, which is the real, honest
+  // signal to fall back to actual OCR (ML Kit) rather than a wasted attempt.
   async function pickPdf() {
     setError(null);
     const picked = await DocumentPicker.getDocumentAsync({
@@ -125,8 +131,18 @@ export default function ImportScreen() {
     const { name, uri } = picked.assets[0];
     setPdfFile({ name, status: 'extracting' });
     try {
-      const pages = await getOcrEngine('pdfjs').extractPdf(uri);
-      setPdfFile({ name, status: 'done', pages });
+      const pdfjs = getOcrEngine('pdfjs');
+      let pages = await pdfjs.extractPdf(uri);
+      let engineLabel = pdfjs.label;
+
+      const hasText = pages.some(p => p.lines.length > 0);
+      const mlkit = getOcrEngine('mlkit');
+      if (!hasText && mlkit.isAvailable()) {
+        pages = await mlkit.extractPdf(uri);
+        engineLabel = mlkit.label;
+      }
+
+      setPdfFile({ name, status: 'done', pages, engineLabel });
     } catch (err) {
       setPdfFile({ name, status: 'error', error: errorMessage(err) });
     }
@@ -397,7 +413,7 @@ export default function ImportScreen() {
               </Sans>
             ) : (pdfFile.pages?.reduce((n, p) => n + p.lines.length, 0) ?? 0) > 0 ? (
               <Card style={{ gap: space.sm, width: '100%' }}>
-                <Eyebrow>Text-layer preview</Eyebrow>
+                <Eyebrow>{pdfFile.engineLabel} preview</Eyebrow>
                 <Sans size={12} tone="muted">
                   {pdfFile.pages?.length} page{pdfFile.pages?.length === 1 ? '' : 's'},{' '}
                   {pdfFile.pages?.reduce((n, p) => n + p.lines.length, 0)} lines found. Turning this into
@@ -410,10 +426,15 @@ export default function ImportScreen() {
                     .join('\n')}
                 </Mono>
               </Card>
+            ) : pdfFile.engineLabel === getOcrEngine('mlkit').label ? (
+              <Sans tone="muted" style={{ textAlign: 'center' }}>
+                No text found even with on-device OCR — the scan may be blank or unreadable. Export a CSV
+                from your bank instead.
+              </Sans>
             ) : (
               <Sans tone="muted" style={{ textAlign: 'center' }}>
-                No text layer found — this looks like a scanned PDF. On-device OCR for that case isn&apos;t
-                wired up yet; export a CSV from your bank instead.
+                No text layer found — this looks like a scanned PDF, and on-device OCR needs a dev-client
+                build not installed here. Export a CSV from your bank instead.
               </Sans>
             )}
             <Button title="Choose CSV File" onPress={pickFile} />

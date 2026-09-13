@@ -273,8 +273,45 @@ for why this is behind a swappable `OcrEngine` interface rather than one hardcod
   CSV picker.
 - The `pdfjs` engine (§1.12) end-to-end: a born-digital PDF returns its exact text, a scanned PDF
   correctly reports "no text layer found" with no crash — the screen shows a text-layer preview or
-  that message accordingly. Turning extracted text into transactions is **not** wired up yet; this
-  only proves extraction works.
+  that message accordingly.
+- The `mlkit` engine (`src/lib/ocr/engines/mlkit.ts`), wired as the automatic fallback when `pdfjs`
+  finds zero lines: renders each page via the same pdf.js WebView bridge (`renderPdfPages` in
+  `pdfjsBridge.tsx`) rather than adding a second native PDF-rendering module, writes each page to a
+  temp PNG, and runs `@react-native-ml-kit/text-recognition` (genuinely on-device — confirmed no
+  network call for the standard Text Recognition API) on it. Verified working end-to-end on a
+  born-digital-JPEG-image PDF: recovered the exact header text ("SAMPLE / Statement of Account /
+  12345678 / JAMES C. MORRISON / …", 104 lines total) via real OCR, not the text layer.
+- Turning extracted text into transactions is **not** wired up yet on either engine; the import
+  screen only shows a preview to prove extraction works, it inserts nothing.
+
+**Known limitation, not fixed — scanned statements using 1-bit `/ImageMask` encoding OCR as
+empty.** Many scanners use `/ImageMask` (a fax-style 1-bit compression for B&W text pages) rather
+than a plain JPEG page image. Rendering that through pdf.js onto this WebView's `<canvas>` comes
+out at extremely low effective contrast — measured around gray 210-250 instead of black; borders
+and rules (vector-drawn) stay crisp, but the actual text pixels are nearly indistinguishable from
+white, so ML Kit's OCR call succeeds but returns zero blocks. Confirmed by pulling the actual
+rendered PNG off-device (`adb exec-out run-as <pkg> cat .../cache/mlkit-page-*.png`) and inspecting
+it directly — the table borders were crisp, the transaction text was a faint ghost.
+
+Two fixes were tried and both rejected:
+- A fixed brightness threshold (e.g. "gray ≥235 → white, else black") recovers the `/ImageMask`
+  text, but there is no single constant that works for both cases: a normal antialiased scan's
+  text is already near-black, and the same threshold that recovers the washed-out mask garbles
+  that case into unreadable noise (verified: OCR on a real JPEG page went from correct text to
+  "ecount / Ageount / Tcdor / 193:" after adding the threshold).
+- Otsu's method (adaptive per-image threshold, the theoretically correct fix — it separates each
+  image's own two histogram peaks instead of guessing a constant) hung for 90+ seconds with zero
+  progress on a multi-megapixel canvas. Never diagnosed further — likely `getImageData`/
+  `putImageData` cost in this WebView's canvas backend at that resolution, not a logic bug in the
+  Otsu implementation itself (it's a bounded double pass over the pixel buffer). Reverted rather
+  than ship a hang.
+
+Current shipped behavior: `renderPages` in `pdfjsBridge.tsx` does a plain, fast, unmodified render
+at scale 2 — correct and fast for normal scans, silently returns nothing useful for `/ImageMask`
+scans. Fixing that properly needs either a cheap adaptive threshold that doesn't choke on a large
+canvas (e.g. downsample before histogramming, or sample a subset of pixels instead of all of
+them), or investigating why pdf.js renders `/ImageMask` at reduced opacity on this WebView in the
+first place.
 
 **Gotchas that ate the debugging time, kept here so nobody re-discovers them the slow way:**
 1. **A 0×0 `<WebView>` gets throttled by Chromium and never runs its JS at all.** The hidden bridge
@@ -299,14 +336,37 @@ for why this is behind a swappable `OcrEngine` interface rather than one hardcod
    `pdfjs-worker.rawjs`, registered as a Metro asset extension in `metro.config.js`) and injected as
    Blobs rather than fetched from a CDN — keeps extraction fully offline, no library-fetch network
    dependency at runtime either.
+7. **`expo run:android`'s first Gradle build failed on `jlink`** (`Execution failed for
+   JdkImageTransform`) against the system JDK (Oracle JDK 26 at `/usr/lib/jvm/`) — too new for this
+   AGP/Gradle combination. Fix: point `JAVA_HOME` at Android Studio's bundled JBR instead
+   (`~/android_studio/android-studio/jbr`, JDK 21) before running Gradle. If a fresh native build
+   fails specifically inside a `jlink`/`core-for-system-modules.jar` step, it's the JDK version,
+   not the RN/Expo config.
+8. **`adb install` failed with "Requested internal only, but not enough space"** — the AVD's
+   `disk.dataPartition.size` (`~/.android/avd/<name>.avd/config.ini`) was only 6G and 94% full from
+   preinstalled Play Store apps (Chrome, YouTube, Gmail, Maps, …), which `pm uninstall --user 0`
+   does *not* reclaim space for (they're preinstalled system packages; that command just hides them
+   for the user, the APK bytes stay). Fix: bump `disk.dataPartition.size` in `config.ini` and
+   relaunch the emulator with `-wipe-data` to actually apply the new size — a plain restart does
+   not resize an existing data image.
+9. **The Android document picker ("Recent"/list view) is the reliable way to pick a test file; the
+   grid view reached via Documents → Downloads intermittently stopped responding to taps
+   entirely** (no visual selection state, no error) across many retries and coordinate recalculations
+   confirmed correct via `dumpsys window`/`input`. Backing out to the picker root and reopening from
+   "Recent" (list layout) reliably worked every time it was tried. If a picked file "does nothing"
+   on tap, try List via Recent before assuming the app's `DocumentPicker` call is broken.
+10. `run-as <package> cat <path> > file` is how to pull a file out of an app's private
+    `/data/user/0/<pkg>/cache` (or any private dir) on a debuggable build for inspection — plain
+    `adb pull` can't read there without root.
 
 **Not started:**
-- The other three candidate engines — `@react-native-ml-kit/text-recognition`,
-  `expo-pdf-text-extract`, `ppu-paddle-ocr` — all need a native module, meaning `expo prebuild` and
-  a real dev-client build (no Expo Go). None of the packages are installed yet.
+- `expo-pdf-text-extract` and `ppu-paddle-ocr` — the two remaining candidate engines from the
+  original research — aren't installed or scaffolded yet.
 - Benchmarking the engines against each other (speed/accuracy/footprint) — the actual reason for
-  the swappable-engine design — hasn't started; only `pdfjs` exists to benchmark against so far.
-- Turning extracted lines into transactions and posting to `/ingest` — today's PDF flow stops at a
+  the swappable-engine design — hasn't started; only `pdfjs` and `mlkit` exist to benchmark so far,
+  and only on synthetic single-page test fixtures, not a real multi-page statement.
+- Fixing the `/ImageMask` rendering limitation above.
+- Turning extracted text into transactions and posting to `/ingest` — today's PDF flow stops at a
   preview, it inserts nothing.
 - iOS is completely unverified — this machine has no Xcode/Simulator; everything above was tested
   on Android only.

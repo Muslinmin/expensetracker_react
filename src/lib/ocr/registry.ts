@@ -1,3 +1,4 @@
+import { mlKitEngine } from './engines/mlkit';
 import { pdfJsEngine } from './engines/pdfjs';
 import type { OcrEngine, OcrEngineId } from './types';
 
@@ -6,7 +7,7 @@ import type { OcrEngine, OcrEngineId } from './types';
  * Adding a new engine — or swapping which one the import flow uses — means
  * touching this list and nothing that calls getOcrEngine().
  */
-export const OCR_ENGINES: readonly OcrEngine[] = [pdfJsEngine];
+export const OCR_ENGINES: readonly OcrEngine[] = [pdfJsEngine, mlKitEngine];
 
 export function getOcrEngine(id: OcrEngineId): OcrEngine {
   const engine = OCR_ENGINES.find(e => e.id === id);

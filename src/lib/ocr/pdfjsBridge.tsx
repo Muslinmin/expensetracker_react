@@ -6,27 +6,30 @@ import WebView from 'react-native-webview';
 
 import type { ExtractedPage } from './types';
 
+type BridgeJobType = 'extract' | 'render';
+
 type PendingJob = {
-  resolve: (pages: ExtractedPage[]) => void;
+  resolve: (result: ExtractedPage[] | string[]) => void;
   reject: (err: Error) => void;
 };
 
 type BridgeMessage =
   | { type: 'ready' }
   | { type: 'result'; pages: ExtractedPage[] }
+  | { type: 'rendered'; images: string[] }
   | { type: 'error'; message: string }
   | { type: 'log'; message: string };
 
 let webviewRef: WebView | null = null;
 let bridgeReady = false;
-let queuedJob: { base64: string; job: PendingJob } | null = null;
+let queuedJob: { jobType: BridgeJobType; base64: string; job: PendingJob } | null = null;
 let currentJob: PendingJob | null = null;
-// Set by PdfJsBridgeHost while mounted — lets runPdfJsExtraction trigger the
+// Set by PdfJsBridgeHost while mounted — lets runBridgeJob trigger the
 // (one-time, lazy) library load without the host needing to expose a ref.
 let ensureLoad: (() => Promise<void>) | null = null;
 
-function postToBridge(base64: string) {
-  webviewRef?.postMessage(JSON.stringify({ type: 'extract', base64 }));
+function postToBridge(jobType: BridgeJobType, base64: string) {
+  webviewRef?.postMessage(JSON.stringify({ type: jobType, base64 }));
 }
 
 function handleBridgeMessage(raw: string) {
@@ -44,7 +47,7 @@ function handleBridgeMessage(raw: string) {
     bridgeReady = true;
     if (queuedJob) {
       currentJob = queuedJob.job;
-      postToBridge(queuedJob.base64);
+      postToBridge(queuedJob.jobType, queuedJob.base64);
       queuedJob = null;
     }
     return;
@@ -54,26 +57,40 @@ function handleBridgeMessage(raw: string) {
     currentJob = null;
     return;
   }
+  if (msg.type === 'rendered') {
+    currentJob?.resolve(msg.images);
+    currentJob = null;
+    return;
+  }
   if (msg.type === 'error') {
     currentJob?.reject(new Error(msg.message));
     currentJob = null;
   }
 }
 
-export async function runPdfJsExtraction(base64: string): Promise<ExtractedPage[]> {
+async function runBridgeJob<T>(jobType: BridgeJobType, base64: string): Promise<T> {
   if (!ensureLoad) {
     throw new Error('PDF.js bridge is not mounted — is <PdfJsBridgeHost /> in the app tree?');
   }
   await ensureLoad();
   return new Promise((resolve, reject) => {
-    const job: PendingJob = { resolve, reject };
+    const job: PendingJob = { resolve: resolve as PendingJob['resolve'], reject };
     if (bridgeReady && webviewRef) {
       currentJob = job;
-      postToBridge(base64);
+      postToBridge(jobType, base64);
     } else {
-      queuedJob = { base64, job };
+      queuedJob = { jobType, base64, job };
     }
   });
+}
+
+export function runPdfJsExtraction(base64: string): Promise<ExtractedPage[]> {
+  return runBridgeJob('extract', base64);
+}
+
+/** Renders each page to a PNG, base64-encoded — for engines (e.g. ML Kit) that need an image, not text. */
+export function renderPdfPages(base64: string): Promise<string[]> {
+  return runBridgeJob('render', base64);
 }
 
 export function isPdfJsBridgeMounted(): boolean {
@@ -130,11 +147,15 @@ function groupLines(items) {
     .filter(function (l) { return l.text.length > 0; });
 }
 
-async function extract(base64) {
+function base64ToBytes(base64) {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const doc = await window.pdfjsLib.getDocument({ data: bytes }).promise;
+  return bytes;
+}
+
+async function extract(base64) {
+  const doc = await window.pdfjsLib.getDocument({ data: base64ToBytes(base64) }).promise;
   const pages = [];
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
@@ -144,6 +165,34 @@ async function extract(base64) {
   return pages;
 }
 
+async function renderPages(base64) {
+  // scale 2 ~= 144dpi off a 72dpi-baseline page — enough detail for OCR
+  // without ballooning the postMessage payload on a multi-page statement.
+  //
+  // KNOWN LIMITATION, not fixed here: scanned statements stored as 1-bit
+  // /ImageMask XObjects (fax-style compression for B&W text pages) render on
+  // this WebView's canvas at extremely low effective contrast (measured
+  // ~gray 210-250 instead of black) — borders/rules (vector ops) stay crisp,
+  // the actual text is nearly invisible, and ML Kit finds nothing. A fixed
+  // brightness threshold "fixes" that but garbles normal antialiased scans
+  // (their text is genuinely near-black already); Otsu's adaptive threshold
+  // is the correct fix in principle but getImageData/putImageData over a
+  // multi-megapixel canvas hung this WebView for 90+ seconds — not shippable
+  // as-is. Left unresolved; see .agent/frontend_implementation.md Phase 10.
+  const doc = await window.pdfjsLib.getDocument({ data: base64ToBytes(base64) }).promise;
+  const images = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const viewport = page.getViewport({ scale: 2 });
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport: viewport }).promise;
+    images.push(canvas.toDataURL('image/png').split(',')[1]);
+  }
+  return images;
+}
+
 function onMessage(event) {
   let msg;
   try {
@@ -151,10 +200,15 @@ function onMessage(event) {
   } catch (e) {
     return;
   }
-  if (msg.type !== 'extract') return;
-  extract(msg.base64)
-    .then(function (pages) { post({ type: 'result', pages: pages }); })
-    .catch(function (err) { post({ type: 'error', message: String(err && err.message ? err.message : err) }); });
+  if (msg.type === 'extract') {
+    extract(msg.base64)
+      .then(function (pages) { post({ type: 'result', pages: pages }); })
+      .catch(function (err) { post({ type: 'error', message: String(err && err.message ? err.message : err) }); });
+  } else if (msg.type === 'render') {
+    renderPages(msg.base64)
+      .then(function (images) { post({ type: 'rendered', images: images }); })
+      .catch(function (err) { post({ type: 'error', message: String(err && err.message ? err.message : err) }); });
+  }
 }
 document.addEventListener('message', onMessage);
 window.addEventListener('message', onMessage);
